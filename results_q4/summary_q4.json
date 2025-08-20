@@ -7,10 +7,10 @@
         1.0,
         1.0
       ],
-      "time_sec_mean_successes": 0.039371681213378903,
+      "time_sec_mean_successes": 0.05650067329406738,
       "time_sec_CI95_successes": [
-        0.0327198819689103,
-        0.04602348045784751
+        0.02557534309890734,
+        0.08742600348922742
       ],
       "path_len_mean_successes": 53.380005836486816,
       "path_len_CI95_successes": [
@@ -25,10 +25,10 @@
         1.0,
         1.0
       ],
-      "time_sec_mean_successes": 0.04921512603759766,
+      "time_sec_mean_successes": 0.05960965156555176,
       "time_sec_CI95_successes": [
-        0.03270360102917377,
-        0.06572665104602154
+        0.048240347839388936,
+        0.07097895529171458
       ],
       "path_len_mean_successes": 53.380005836486816,
       "path_len_CI95_successes": [
@@ -43,10 +43,10 @@
         1.0,
         1.0
       ],
-      "time_sec_mean_successes": 0.04986495971679687,
+      "time_sec_mean_successes": 0.07225799560546875,
       "time_sec_CI95_successes": [
-        0.03187439932061446,
-        0.06785552011297928
+        0.056966378131127524,
+        0.08754961307980998
       ],
       "path_len_mean_successes": 53.65809450149536,
       "path_len_CI95_successes": [
@@ -61,10 +61,10 @@
         1.0,
         1.0
       ],
-      "time_sec_mean_successes": 0.0447028636932373,
+      "time_sec_mean_successes": 0.06853842735290527,
       "time_sec_CI95_successes": [
-        0.03269408876516667,
-        0.05671163862130794
+        0.053848710219941635,
+        0.0832281444858689
       ],
       "path_len_mean_successes": 53.65809450149536,
       "path_len_CI95_successes": [
@@ -79,10 +79,10 @@
         0.4080000000000001,
         1.192
       ],
-      "time_sec_mean_successes": 0.03736335039138794,
+      "time_sec_mean_successes": 0.05066913366317749,
       "time_sec_CI95_successes": [
-        0.008801015018196221,
-        0.06592568576457966
+        0.03053048117670185,
+        0.07080778614965313
       ],
       "path_len_mean_successes": 54.198493242263794,
       "path_len_CI95_successes": [

@@ -2,7 +2,7 @@
 """
 Analyse Q4 results: pretty-print summary by K and level, and (optional) plots.
 Usage:
-    python analyse_q4_results.py --indir results_q4 --make-plots 1
+    python analyse_q4_results.py --indir results_q4_k --make-plots 1
 """
 import argparse, json, os, math
 import numpy as np
@@ -37,7 +37,6 @@ def main():
 
     if args.make_plots:
         import matplotlib.pyplot as plt
-        # Success vs level for each K
         for K in sorted(int(k) for k in summary.keys()):
             levels = sorted(int(l) for l in summary[str(K)].keys())
             y = [summary[str(K)][str(L)]['success_rate_mean'] for L in levels]
@@ -51,7 +50,6 @@ def main():
             plt.grid(True, linestyle=':')
             plt.tight_layout()
             plt.savefig(os.path.join(args.indir, f'q4_success_vs_complexity_K{K}.png'), dpi=150)
-
         print("\nSaved plots to:")
         for K in sorted(int(k) for k in summary.keys()):
             print(" -", os.path.join(args.indir, f'q4_success_vs_complexity_K{K}.png'))
