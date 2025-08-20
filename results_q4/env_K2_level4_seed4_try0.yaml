@@ -1,0 +1,82 @@
+bounds:
+  x:
+  - 0.0
+  - 50.0
+  y:
+  - 0.0
+  - 50.0
+  z:
+  - 0.0
+  - 50.0
+initial_configuration:
+- - 1.0
+  - 1.0
+  - 1.0
+- - 3.0
+  - 1.0
+  - 1.0
+obstacles:
+- type: box
+  position:
+  - 12.75
+  - 25.0
+  - 1.0
+  size:
+  - 23.5
+  - 2.0
+  - 2.0
+  rotation:
+  - 0
+  - 0
+  - 0
+  color: red
+- type: box
+  position:
+  - 37.25
+  - 25.0
+  - 1.0
+  size:
+  - 23.5
+  - 2.0
+  - 2.0
+  rotation:
+  - 0
+  - 0
+  - 0
+  color: red
+- type: box
+  position:
+  - 15.951735496520996
+  - 35.17597961425781
+  - 5.049345016479492
+  size:
+  - 1.7703007459640503
+  - 1.5594515800476074
+  - 2.098803758621216
+  rotation:
+  - 0
+  - 0
+  - 0
+  color: red
+- type: sphere
+  position:
+  - 38.82080841064453
+  - 37.197479248046875
+  - 2.6083176136016846
+  radius: 1.8050200122622204
+  rotation:
+  - 0
+  - 0
+  - 0
+  color: red
+goals:
+- position:
+  - 30.0
+  - 30.0
+  - 2.0
+  radius: 1.0
+- position:
+  - 20.0
+  - 30.0
+  - 2.0
+  radius: 1.0

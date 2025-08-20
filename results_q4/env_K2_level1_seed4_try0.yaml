@@ -1,0 +1,51 @@
+bounds:
+  x:
+  - 0.0
+  - 50.0
+  y:
+  - 0.0
+  - 50.0
+  z:
+  - 0.0
+  - 50.0
+initial_configuration:
+- - 1.0
+  - 1.0
+  - 1.0
+- - 3.0
+  - 1.0
+  - 1.0
+obstacles:
+- type: sphere
+  position:
+  - 6.745637893676758
+  - 20.218679428100586
+  - 1.9722365140914917
+  radius: 1.0997726435193849
+  rotation:
+  - 0
+  - 0
+  - 0
+  color: red
+- type: sphere
+  position:
+  - 27.272483825683594
+  - 15.311285018920898
+  - 9.905235290527344
+  radius: 1.0882705847389418
+  rotation:
+  - 0
+  - 0
+  - 0
+  color: red
+goals:
+- position:
+  - 30.0
+  - 30.0
+  - 2.0
+  radius: 1.0
+- position:
+  - 20.0
+  - 30.0
+  - 2.0
+  radius: 1.0

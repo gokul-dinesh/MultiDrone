@@ -60,7 +60,7 @@ class Tree:
         return len(self.nodes) - 1
 
     def nearest(self, q: np.ndarray) -> int:
-        # Linear scan (fast enough in practice for this assignment)
+        # Linear scan
         dmin = float("inf")
         imin = 0
         for i, n in enumerate(self.nodes):
@@ -233,8 +233,7 @@ def rrt_connect_plan(
     if not success:
         return False, [], stats
 
-    # Reconstruct path; 'a' and 'b' may have been swapped odd times; resolve using last step data.
-    # We know q_new_a belongs to the tree we called 'a' at connection time.
+    # Reconstruct path
     path_flat = reconstruct_bidirectional_path(a, meet_a, b, meet_b)
 
     # Post-process (shortcut) for fewer waypoints

@@ -1,0 +1,94 @@
+{
+  "2": {
+    "0": {
+      "n_trials": 5,
+      "success_rate_mean": 1.0,
+      "success_rate_CI95": [
+        1.0,
+        1.0
+      ],
+      "time_sec_mean_successes": 0.039371681213378903,
+      "time_sec_CI95_successes": [
+        0.0327198819689103,
+        0.04602348045784751
+      ],
+      "path_len_mean_successes": 53.380005836486816,
+      "path_len_CI95_successes": [
+        53.08153737541055,
+        53.678474297563085
+      ]
+    },
+    "1": {
+      "n_trials": 5,
+      "success_rate_mean": 1.0,
+      "success_rate_CI95": [
+        1.0,
+        1.0
+      ],
+      "time_sec_mean_successes": 0.04921512603759766,
+      "time_sec_CI95_successes": [
+        0.03270360102917377,
+        0.06572665104602154
+      ],
+      "path_len_mean_successes": 53.380005836486816,
+      "path_len_CI95_successes": [
+        53.08153737541055,
+        53.678474297563085
+      ]
+    },
+    "2": {
+      "n_trials": 5,
+      "success_rate_mean": 1.0,
+      "success_rate_CI95": [
+        1.0,
+        1.0
+      ],
+      "time_sec_mean_successes": 0.04986495971679687,
+      "time_sec_CI95_successes": [
+        0.03187439932061446,
+        0.06785552011297928
+      ],
+      "path_len_mean_successes": 53.65809450149536,
+      "path_len_CI95_successes": [
+        52.984288858691095,
+        54.33190014429963
+      ]
+    },
+    "3": {
+      "n_trials": 5,
+      "success_rate_mean": 1.0,
+      "success_rate_CI95": [
+        1.0,
+        1.0
+      ],
+      "time_sec_mean_successes": 0.0447028636932373,
+      "time_sec_CI95_successes": [
+        0.03269408876516667,
+        0.05671163862130794
+      ],
+      "path_len_mean_successes": 53.65809450149536,
+      "path_len_CI95_successes": [
+        52.984288858691095,
+        54.33190014429963
+      ]
+    },
+    "4": {
+      "n_trials": 5,
+      "success_rate_mean": 0.8,
+      "success_rate_CI95": [
+        0.4080000000000001,
+        1.192
+      ],
+      "time_sec_mean_successes": 0.03736335039138794,
+      "time_sec_CI95_successes": [
+        0.008801015018196221,
+        0.06592568576457966
+      ],
+      "path_len_mean_successes": 54.198493242263794,
+      "path_len_CI95_successes": [
+        52.40937605533524,
+        55.98761042919235
+      ]
+    }
+  }
+}
