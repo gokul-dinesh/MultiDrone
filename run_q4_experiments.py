@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """
-Part B, Q4 runner (robust): sweeps complexity + optional K, with strong validity guarantees.
+Part B, Q4 runner (v3.2) — harder environments vertically + robust high‑K starts.
 
-Key improvements over v2.2:
-- If a valid start can't be found for a given (K,level,seed), we now also **re-sample** starts/goals
-  (not just the map) up to --spawn-tries times (default 40).
-- Exposed --env-tries (default 20) attempts per spawn to regenerate maps.
-- Default min-sep relaxed to exactly 2*drone_radius (i.e., 0.6 if radius=0.3).
-- Extra debug prints that show *why* a spawn/env attempt is rejected.
+What’s new vs v3.1:
+- Random obstacles can span almost floor→ceiling (prevents easy overflight).
+- L4 narrow passage walls are full-height; gap width ~= (2*drone_radius + 0.05).
+- Optional “ceiling slab” for levels >=3 to confine vertical motion.
+- Everything else (grid starts, adaptive spacing, obstacle clearance, logs) kept.
 
-Typical full run:
-  python run_q4_experiments.py --base-env environment.yaml --levels 0 1 2 3 4 --seeds 0 1 2 3 4 --k-range 1 12 --outdir results_q4_k
+Quick check:
+  python run_q4_experiments.py --base-env environment.yaml --levels 0 1 2 3 4 --seeds 0 1 --k-range 8 8 --time-limit 20 --outdir results_q4_check --debug 1
 """
 import argparse, os, time, math, json, random, sys
 import numpy as np
 import yaml
 from typing import Dict, Any, Tuple, List
 
-VERSION = "Q4-runner v3.0 (spawn+env retries, stronger logging)"
+VERSION = "Q4-runner v3.2 (full-height clutter + size-aware L4 gap)"
 
 from multi_drone import MultiDrone
 from rrt_connect_multidrone import rrt_connect_plan
+
+# ---------------------- helpers ----------------------
 
 def read_base(env_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     with open(env_path, 'r') as f:
@@ -29,6 +30,45 @@ def read_base(env_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     init = np.array(data['initial_configuration'], dtype=np.float32)
     goals = np.array([g['position'] for g in data['goals']], dtype=np.float32)
     return bounds, init, goals
+
+def clamp_to_bounds(arr: np.ndarray, bounds: np.ndarray, margin: float=0.5) -> np.ndarray:
+    lo = bounds[:,0] + margin
+    hi = bounds[:,1] - margin
+    return np.minimum(hi, np.maximum(lo, arr))
+
+def area_capacity(bounds: np.ndarray, sep: float) -> int:
+    w = bounds[0,1] - bounds[0,0] - 1.0  # margins
+    h = bounds[1,1] - bounds[1,0] - 1.0
+    if w <= 0 or h <= 0 or sep <= 0: return 0
+    cols = int(w // sep); rows = int(h // sep)
+    return max(0, rows * cols)
+
+def grid_layout(bounds: np.ndarray, K: int, sep: float, z_ref: float) -> np.ndarray:
+    """Return Kx3 grid inside bounds using spacing 'sep' (square packing)."""
+    w = bounds[0,1] - bounds[0,0] - 1.0
+    h = bounds[1,1] - bounds[1,0] - 1.0
+    cols = max(1, int(w // sep))
+    rows = max(1, int(h // sep))
+    if rows * cols < K:
+        cols = max(cols, int(math.ceil(math.sqrt(K))))
+        rows = max(rows, int(math.ceil(K / cols)))
+    x0 = (bounds[0,0] + bounds[0,1]) * 0.5 - (cols-1) * sep * 0.5
+    y0 = (bounds[1,0] + bounds[1,1]) * 0.5 - (rows-1) * sep * 0.5
+    pts = []
+    idx = 0
+    for r in range(rows):
+        for c in range(cols):
+            if idx >= K: break
+            pts.append([x0 + c*sep, y0 + r*sep, z_ref])
+            idx += 1
+        if idx >= K: break
+    return clamp_to_bounds(np.array(pts, dtype=np.float32), bounds, margin=0.5)
+
+def min_pairwise_dist(arr: np.ndarray) -> float:
+    if len(arr) < 2: return float('inf')
+    D = np.linalg.norm(arr[:,None,:]-arr[None,:,:], axis=-1)
+    mask = np.triu(np.ones((len(arr),len(arr))),1).astype(bool)
+    return float(np.min(D[mask]))
 
 def randf(lo, hi, rng) -> float:
     return float(rng.uniform(lo, hi))
@@ -42,129 +82,158 @@ def make_sphere(position, radius, rotation=(0,0,0), color='red'):
 def make_cylinder(p1, p2, radius, rotation=(0,0,0), color='red'):
     return {'type':'cylinder', 'endpoints': [[float(x) for x in p1], [float(x) for x in p2]], 'radius': float(radius), 'rotation': list(rotation), 'color': color}
 
-def make_init_goals_for_K(bounds: np.ndarray, base_init: np.ndarray, base_goals: np.ndarray, K: int, rng: random.Random, min_sep: float) -> Tuple[np.ndarray, np.ndarray]:
-    """Build Kx3 start/goal sets with >= min_sep spacing (simple Poisson-disc around centroids)."""
-    import numpy as _np
-    M = base_init.shape[0]
-    def ok(arr):
-        if len(arr) < 2: return True
-        D = _np.linalg.norm(arr[:,None,:]-arr[None,:,:], axis=-1)
-        mask = _np.triu(_np.ones((len(arr),len(arr))),1).astype(bool)
-        return not _np.any(D[mask] < min_sep)
-    def clamp(arr):
-        lo = bounds[:,0] + 1.0; hi = bounds[:,1] - 1.0  # keep a little margin from walls
-        return _np.minimum(hi, _np.maximum(lo, arr))
-    init = base_init[:min(K,M)].copy(); goals = base_goals[:min(K,M)].copy()
-    smean = _np.mean(base_init, axis=0); gmean = _np.mean(base_goals, axis=0)
-    def sample_around(center):
-        r = rng.uniform(min_sep*0.7, min_sep*1.5); ang = rng.uniform(0, 2*_np.pi)
-        return _np.array([center[0] + r*_np.cos(ang), center[1] + r*_np.sin(ang), center[2]], dtype=_np.float32)
-    while len(init) < K:
-        cand = sample_around(smean); cand_g = sample_around(gmean)
-        for _ in range(300):
-            cand = clamp(cand[None,:])[0]; cand_g = clamp(cand_g[None,:])[0]
-            if ok(_np.vstack([init, cand])) and ok(_np.vstack([goals, cand_g])): break
-            cand = sample_around(smean); cand_g = sample_around(gmean)
-        init = _np.vstack([init, cand]); goals = _np.vstack([goals, cand_g])
-    # gentle push apart in XY if needed
-    for arr in (init, goals):
-        if not ok(arr):
-            center = arr.mean(axis=0)
-            for _ in range(80):
-                if ok(arr): break
-                for i in range(len(arr)):
-                    v = arr[i]-center
-                    if (v[:2]**2).sum() < 1e-8:
-                        v[:2] = _np.array([rng.uniform(-1,1), rng.uniform(-1,1)], dtype=_np.float32)
-                    arr[i,:2] = arr[i,:2] + (v[:2] / (1e-9+_np.linalg.norm(v[:2])))*0.06
-                arr[:] = clamp(arr)
-    return init.astype(_np.float32), goals.astype(_np.float32)
+def obstacle_clear_from_points(ob, points: np.ndarray, clearance: float, bounds: np.ndarray) -> bool:
+    """Conservative clearance check: keep a buffer 'clearance' (meters) from every point."""
+    pts = points
+    if ob['type'] == 'sphere':
+        c = np.array(ob['position'], dtype=np.float32)
+        rad = float(ob['radius'])
+        d = np.min(np.linalg.norm(pts - c[None,:], axis=-1))
+        return d >= (rad + clearance)
+    elif ob['type'] == 'box':
+        c = np.array(ob['position'], dtype=np.float32)
+        half = 0.5 * np.array(ob['size'], dtype=np.float32)
+        half_exp = half + clearance
+        diff = np.abs(pts - c[None,:]) - half_exp[None,:]
+        diff_clip = np.maximum(diff, 0.0)
+        d = np.min(np.linalg.norm(diff_clip, axis=-1))
+        return d > 0.0
+    elif ob['type'] == 'cylinder':
+        p1 = np.array(ob['endpoints'][0], dtype=np.float32)
+        p2 = np.array(ob['endpoints'][1], dtype=np.float32)
+        r = float(ob['radius']) + clearance
+        axis = p2 - p1
+        axis_xy = axis.copy(); axis_xy[2] = 0.0
+        for p in pts:
+            if not (min(p1[2],p2[2]) - clearance <= p[2] <= max(p1[2],p2[2]) + clearance):
+                continue
+            v = p[:2] - p1[:2]
+            if np.linalg.norm(axis_xy[:2]) < 1e-6:
+                dxy = np.linalg.norm(v)
+            else:
+                t = np.dot(v, axis_xy[:2]) / (np.dot(axis_xy[:2], axis_xy[:2]))
+                t = np.clip(t, 0.0, 1.0)
+                closest = p1[:2] + t*axis_xy[:2]
+                dxy = np.linalg.norm(p[:2] - closest)
+            if dxy < r:
+                return False
+        return True
+    else:
+        return True
 
-def generate_env(bounds: np.ndarray, init: np.ndarray, goals: np.ndarray, level: int, seed: int) -> Dict[str, Any]:
-    rng = random.Random(seed)
+def generate_env(bounds: np.ndarray, init: np.ndarray, goals: np.ndarray, level: int, seed: int, clearance: float, debug: int, rng: random.Random) -> Dict[str, Any]:
+    """Create an environment; obstacles respect a 'clearance' from starts/goals and can be full-height."""
     env = {
         'bounds': {'x': bounds[0].tolist(), 'y': bounds[1].tolist(), 'z': bounds[2].tolist()},
         'initial_configuration': init.tolist(),
         'obstacles': [],
         'goals': [{'position': g.tolist(), 'radius': 1.0} for g in goals],
     }
-    def far_from_start_goal(pos):
-        smean = np.mean(init, axis=0); gmean = np.mean(goals, axis=0)
-        return (np.linalg.norm(pos - smean) > 3.0) and (np.linalg.norm(pos - gmean) > 3.0)
+    # Allow tall obstacles (avoid trivial overflight)
+    ZR = (bounds[2,0]+0.5, bounds[2,1]-0.5)
     XR = (bounds[0,0]+2.0, bounds[0,1]-2.0); YR = (bounds[1,0]+2.0, bounds[1,1]-2.0)
-    ZR = (bounds[2,0]+0.5, min(bounds[2,1]-0.5, bounds[2,0]+10.0))
+
+    def try_add_obstacle(ob):
+        if obstacle_clear_from_points(ob, init, clearance, bounds) and obstacle_clear_from_points(ob, goals, clearance, bounds):
+            env['obstacles'].append(ob); return True
+        return False
+
     def add_random_obstacle():
         typ = rng.choice(['box','sphere','cylinder'])
         if typ == 'box':
             pos = np.array([randf(*XR, rng), randf(*YR, rng), randf(*ZR, rng)], dtype=np.float32)
-            if not far_from_start_goal(pos): return
-            size = np.array([randf(1.5,4.5,rng), randf(1.5,4.5,rng), randf(1.0,3.0,rng)], dtype=np.float32)
-            env['obstacles'].append(make_box(pos, size))
+            # z-size can be large (up to almost ceiling)
+            z_span = randf(1.0, max(1.0, (bounds[2,1]-bounds[2,0]) - 1.0), rng)
+            size = np.array([randf(1.5,4.5,rng), randf(1.5,4.5,rng), z_span], dtype=np.float32)
+            try_add_obstacle(make_box(pos, size))
         elif typ == 'sphere':
             pos = np.array([randf(*XR, rng), randf(*YR, rng), randf(*ZR, rng)], dtype=np.float32)
-            if not far_from_start_goal(pos): return
             radius = randf(1.0, 2.5, rng)
-            env['obstacles'].append(make_sphere(pos, radius))
+            try_add_obstacle(make_sphere(pos, radius))
         else:
-            p1 = np.array([randf(*XR, rng), randf(*YR, rng), bounds[2,0]], dtype=np.float32)
-            p2 = p1.copy(); p2[2] = min(bounds[2,1], p1[2] + randf(8.0, 15.0, rng))
+            # vertical cylinder spanning almost full height
+            p1 = np.array([randf(*XR, rng), randf(*YR, rng), bounds[2,0]+0.5], dtype=np.float32)
+            p2 = p1.copy(); p2[2] = bounds[2,1]-0.5
             radius = randf(1.0, 2.5, rng)
-            env['obstacles'].append(make_cylinder(p1, p2, radius))
-    if level == 0: pass
+            try_add_obstacle(make_cylinder(p1, p2, radius))
+
+    if level == 0:
+        pass
     elif level == 1:
         for _ in range(rng.randint(2,3)): add_random_obstacle()
     elif level == 2:
         for _ in range(rng.randint(4,5)): add_random_obstacle()
     elif level == 3:
         for _ in range(rng.randint(6,8)): add_random_obstacle()
+        # optional shallow ceiling slab to confine motion
+        x_len = (bounds[0,1]-bounds[0,0]) - 2.0
+        y_len = (bounds[1,1]-bounds[1,0]) - 2.0
+        z_mid = bounds[2,1]-0.7
+        try_add_obstacle(make_box([ (bounds[0,0]+bounds[0,1])/2,
+                                    (bounds[1,0]+bounds[1,1])/2,
+                                    z_mid ],
+                                  [x_len, y_len, 1.0], color='gray'))
     elif level == 4:
-        x_mid = (bounds[0,0] + bounds[0,1]) * 0.5; y_mid = (bounds[1,0] + bounds[1,1]) * 0.5
-        gap_width = 1.0
+        # Two full-height walls with a narrow gap tied to drone size
+        gap_width = clearance + 0.05  # ~= 2*drone_radius + 0.05
+        x_mid = (bounds[0,0] + bounds[0,1]) * 0.5
+        y_mid = (bounds[1,0] + bounds[1,1]) * 0.5
+        z_mid = (bounds[2,0] + bounds[2,1]) * 0.5
+        z_span = (bounds[2,1] - bounds[2,0]) - 1.0  # leave small margins
         left_len = (x_mid - gap_width*0.5) - (bounds[0,0]+1.0)
         if left_len > 0.5:
-            left_center = np.array([bounds[0,0]+1.0 + left_len*0.5, y_mid, 1.0], dtype=np.float32)
-            left_size   = np.array([left_len, 2.0, 2.0], dtype=np.float32)
-            env['obstacles'].append(make_box(left_center, left_size, color='red'))
+            left_center = np.array([bounds[0,0]+1.0 + left_len*0.5, y_mid, z_mid], dtype=np.float32)
+            left_size   = np.array([left_len, 2.0, z_span], dtype=np.float32)
+            try_add_obstacle(make_box(left_center, left_size, color='red'))
         right_len = (bounds[0,1]-1.0) - (x_mid + gap_width*0.5)
         if right_len > 0.5:
-            right_center = np.array([x_mid + gap_width*0.5 + right_len*0.5, y_mid, 1.0], dtype=np.float32)
-            right_size   = np.array([right_len, 2.0, 2.0], dtype=np.float32)
-            env['obstacles'].append(make_box(right_center, right_size, color='red'))
+            right_center = np.array([x_mid + gap_width*0.5 + right_len*0.5, y_mid, z_mid], dtype=np.float32)
+            right_size   = np.array([right_len, 2.0, z_span], dtype=np.float32)
+            try_add_obstacle(make_box(right_center, right_size, color='red'))
+        # extra clutter
         for _ in range(2): add_random_obstacle()
+        # ceiling slab too
+        x_len = (bounds[0,1]-bounds[0,0]) - 2.0
+        y_len = (bounds[1,1]-bounds[1,0]) - 2.0
+        z_mid2 = bounds[2,1]-0.7
+        try_add_obstacle(make_box([ (bounds[0,0]+bounds[0,1])/2,
+                                    (bounds[1,0]+bounds[1,1])/2,
+                                    z_mid2 ],
+                                  [x_len, y_len, 1.0], color='gray'))
     else:
         raise ValueError("Unsupported complexity level")
+
+    if debug:
+        print(f"[DBG] Generated env with {len(env['obstacles'])} obstacles, full-height enabled.")
     return env
 
-def spawn_valid_trial(K, level, seed, bounds, base_init, base_goals, out_abs, min_sep, env_tries, spawn_tries, debug):
-    """
-    Attempt to find (init, goals, env_path) that passes is_valid(init) and spacing.
-    Returns (init, goals, env_path) or (None, None, None) if all tries fail.
-    """
-    for spawn in range(spawn_tries):
-        rng = random.Random(seed + 50000*spawn + 1000*K + 100*level)
-        init, goals = make_init_goals_for_K(bounds, base_init, base_goals, K, rng, min_sep=min_sep)
+def build_starts_goals(bounds: np.ndarray, base_init: np.ndarray, base_goals: np.ndarray, K: int, drone_radius: float, min_sep_req: float, debug: int) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Return (init Kx3, goals Kx3, used_min_sep). Adapts min_sep if area can't fit K."""
+    z_ref_s = float(np.mean(base_init[:,2]))
+    z_ref_g = float(np.mean(base_goals[:,2]))
+    min_sep_floor = 2.0 * drone_radius
+    sep = max(min_sep_req, min_sep_floor)
 
-        # quick spacing check
-        D = np.linalg.norm(init[:,None,:]-init[None,:,:], axis=-1)
-        mask = np.triu(np.ones((K,K)), 1).astype(bool)
-        min_d = np.min(D[mask]) if K>1 else float('inf')
-        if K>1 and min_d < min_sep-1e-6:
-            if debug: print(f"[DBG] spawn={spawn}: spacing fail (min {min_d:.3f} < {min_sep:.3f}) -> resample starts/goals")
-            continue
+    # Adapt sep downwards (never below floor) until capacity suffices
+    max_iter = 20
+    for _ in range(max_iter):
+        cap = area_capacity(bounds, sep)
+        if cap >= K or sep <= min_sep_floor + 1e-6:
+            break
+        sep *= 0.9
+    if debug:
+        print(f"[DBG] K={K}: requested min_sep={min_sep_req:.3f}, floor={min_sep_floor:.3f}, used={sep:.3f}, capacity={area_capacity(bounds, sep)}")
 
-        for attempt in range(env_tries):
-            env = generate_env(bounds, init, goals, level, seed + 10000*attempt + 7*spawn)
-            env_path = os.path.join(out_abs, f'env_K{K}_L{level}_seed{seed}_spawn{spawn}_try{attempt}.yaml')
-            with open(env_path, 'w') as f:
-                yaml.safe_dump(env, f, sort_keys=False)
+    init = grid_layout(bounds, K, sep, z_ref_s)
+    goals = grid_layout(bounds, K, sep, z_ref_g)
 
-            sim = MultiDrone(num_drones=K, environment_file=env_path)
-            ok = sim.is_valid(init)
-            if debug:
-                print(f"[DBG] spawn={spawn} try={attempt}: is_valid(init)={ok}  min-start-dist={min_d:.3f}  path={env_path}")
-            if ok:
-                return init, goals, env_path
-    return None, None, None
+    # Final clamp
+    init = clamp_to_bounds(init, bounds, margin=0.5)
+    goals = clamp_to_bounds(goals, bounds, margin=0.5)
+
+    return init.astype(np.float32), goals.astype(np.float32), float(sep)
+
+# ---------------------- main ----------------------
 
 def main():
     ap = argparse.ArgumentParser()
@@ -180,9 +249,7 @@ def main():
     ap.add_argument('--outdir', type=str, default='results_q4')
     ap.add_argument('--viz', type=int, default=0)
     ap.add_argument('--drone-radius', type=float, default=0.3)
-    ap.add_argument('--min-sep', type=float, default=None, help='If omitted, defaults to 2*drone_radius')
-    ap.add_argument('--env-tries', type=int, default=20, help='Tries per spawn to regenerate maps')
-    ap.add_argument('--spawn-tries', type=int, default=40, help='How many times to re-sample starts/goals')
+    ap.add_argument('--min-sep', type=float, default=None)
     ap.add_argument('--debug', type=int, default=0)
     args = ap.parse_args()
 
@@ -192,15 +259,19 @@ def main():
     os.makedirs(out_abs, exist_ok=True)
     print(f"[INFO] Using outdir: {out_abs}")
 
+    # Load base
     with open(args.base_env, 'r') as f:
         base = yaml.safe_load(f)
     k_base = len(base['initial_configuration'])
     bounds, base_init, base_goals = read_base(args.base_env)
 
-    min_sep = (2.0*args.drone_radius) if args.min_sep is None else float(args.min_sep)
+    # K sweep
     if args.k_list is not None: k_values = args.k_list
     elif args.k_range is not None: start, end = args.k_range; k_values = list(range(start, end+1))
     else: k_values = [args.k or k_base]
+
+    min_sep_req = (2.0*args.drone_radius + 0.1) if args.min_sep is None else float(args.min_sep)
+    clearance = max(0.5, args.drone_radius*2.0)  # keep obstacles at least this far from starts/goals
 
     per_trial = []
     import csv
@@ -208,16 +279,32 @@ def main():
     for K in k_values:
         for level in args.levels:
             for seed in args.seeds:
-                init, goals, env_path = spawn_valid_trial(
-                    K, level, seed, bounds, base_init, base_goals, out_abs,
-                    min_sep=min_sep, env_tries=args.env_tries, spawn_tries=args.spawn_tries, debug=args.debug
-                )
-                if init is None:
-                    print(f"[WARN] Skip trial: K={K} level={level} seed={seed} (no valid start after {args.spawn_tries} spawns x {args.env_tries} envs).")
+                rng = random.Random(seed + 12345*K + 100*level)
+
+                # Build spaced starts/goals (grid-based)
+                init, goals, used_sep = build_starts_goals(bounds, base_init, base_goals, K, args.drone_radius, min_sep_req, args.debug)
+
+                # Try multiple environments until init is valid
+                ok_init = False; env_path = None; tries = 0
+                for attempt in range(20):
+                    env = generate_env(bounds, init, goals, level, seed + 10000*attempt, clearance, args.debug, rng)
+                    env_path = os.path.join(out_abs, f'env_K{K}_level{level}_seed{seed}_try{attempt}.yaml')
+                    with open(env_path, 'w') as f:
+                        yaml.safe_dump(env, f, sort_keys=False)
+                    sim = MultiDrone(num_drones=K, environment_file=env_path)
+                    tries += 1
+                    valid = sim.is_valid(init)
+                    mind = min_pairwise_dist(init)
+                    if args.debug:
+                        print(f"[DBG] K={K} L={level} seed={seed} try={attempt}: min-start-dist={mind:.3f} used-sep={used_sep:.3f} is_valid={valid} path={env_path}")
+                    if valid:
+                        ok_init = True
+                        break
+                if not ok_init:
+                    print(f"[WARN] Skip trial: K={K} level={level} seed={seed} (no valid start after {tries} envs).")
                     continue
 
-                sim = MultiDrone(num_drones=K, environment_file=env_path)
-
+                # Run planner
                 t0 = time.time()
                 ok, path_flat, stats = rrt_connect_plan(
                     sim, time_limit=args.time_limit, step=args.step,
@@ -233,15 +320,7 @@ def main():
                     'iterations': stats.get('iterations', None), 'path_len_joint': path_len,
                 })
                 if args.debug:
-                    print(f"[DBG]  -> success={ok} time={stats.get('time', elapsed):.3f}s nodes={stats.get('nodes',-1)}")
-
-                if args.viz and ok:
-                    path_cfgs = [p.reshape(K,3).astype(np.float32) for p in path_flat]
-                    if not sim.is_goal(path_cfgs[-1]):
-                        centers = sim.goal_positions.astype(np.float32)
-                        if sim.motion_valid(path_cfgs[-1], centers):
-                            path_cfgs.append(centers)
-                    sim.visualize_paths(path_cfgs)
+                    print(f"[DBG] -> success={ok} time={stats.get('time', elapsed):.3f}s nodes={stats.get('nodes',-1)}")
 
     if len(per_trial)==0:
         print("[ERROR] No trials completed. Nothing to write. Check earlier warnings above.")
