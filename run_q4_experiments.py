@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Part B, Q4 runner (debug-friendly): varies environment complexity, optional K sweep.
-Adds explicit logging so you can see outdir usage and per-trial progress.
+Part B, Q4 runner (robust): sweeps complexity + optional K, with strong validity guarantees.
 
-Usage (minimal test):
-  python run_q4_experiments.py --base-env environment.yaml --levels 0 --seeds 0 --k-range 1 1 --outdir results_q4_k --debug 1
+Key improvements over v2.2:
+- If a valid start can't be found for a given (K,level,seed), we now also **re-sample** starts/goals
+  (not just the map) up to --spawn-tries times (default 40).
+- Exposed --env-tries (default 20) attempts per spawn to regenerate maps.
+- Default min-sep relaxed to exactly 2*drone_radius (i.e., 0.6 if radius=0.3).
+- Extra debug prints that show *why* a spawn/env attempt is rejected.
 
-Typical full run (complexity + K 1..12):
+Typical full run:
   python run_q4_experiments.py --base-env environment.yaml --levels 0 1 2 3 4 --seeds 0 1 2 3 4 --k-range 1 12 --outdir results_q4_k
 """
 import argparse, os, time, math, json, random, sys
@@ -14,7 +17,7 @@ import numpy as np
 import yaml
 from typing import Dict, Any, Tuple, List
 
-VERSION = "Q4-runner v2.2 (with spacing+validity checks + logging)"
+VERSION = "Q4-runner v3.0 (spawn+env retries, stronger logging)"
 
 from multi_drone import MultiDrone
 from rrt_connect_multidrone import rrt_connect_plan
@@ -40,7 +43,7 @@ def make_cylinder(p1, p2, radius, rotation=(0,0,0), color='red'):
     return {'type':'cylinder', 'endpoints': [[float(x) for x in p1], [float(x) for x in p2]], 'radius': float(radius), 'rotation': list(rotation), 'color': color}
 
 def make_init_goals_for_K(bounds: np.ndarray, base_init: np.ndarray, base_goals: np.ndarray, K: int, rng: random.Random, min_sep: float) -> Tuple[np.ndarray, np.ndarray]:
-    """Build Kx3 start/goal sets with >= min_sep pairwise spacing."""
+    """Build Kx3 start/goal sets with >= min_sep spacing (simple Poisson-disc around centroids)."""
     import numpy as _np
     M = base_init.shape[0]
     def ok(arr):
@@ -49,30 +52,31 @@ def make_init_goals_for_K(bounds: np.ndarray, base_init: np.ndarray, base_goals:
         mask = _np.triu(_np.ones((len(arr),len(arr))),1).astype(bool)
         return not _np.any(D[mask] < min_sep)
     def clamp(arr):
-        lo = bounds[:,0] + 0.5; hi = bounds[:,1] - 0.5
+        lo = bounds[:,0] + 1.0; hi = bounds[:,1] - 1.0  # keep a little margin from walls
         return _np.minimum(hi, _np.maximum(lo, arr))
     init = base_init[:min(K,M)].copy(); goals = base_goals[:min(K,M)].copy()
     smean = _np.mean(base_init, axis=0); gmean = _np.mean(base_goals, axis=0)
     def sample_around(center):
-        r = rng.uniform(min_sep*0.6, min_sep*1.2); ang = rng.uniform(0, 2*_np.pi)
+        r = rng.uniform(min_sep*0.7, min_sep*1.5); ang = rng.uniform(0, 2*_np.pi)
         return _np.array([center[0] + r*_np.cos(ang), center[1] + r*_np.sin(ang), center[2]], dtype=_np.float32)
     while len(init) < K:
         cand = sample_around(smean); cand_g = sample_around(gmean)
-        for _ in range(200):
+        for _ in range(300):
             cand = clamp(cand[None,:])[0]; cand_g = clamp(cand_g[None,:])[0]
             if ok(_np.vstack([init, cand])) and ok(_np.vstack([goals, cand_g])): break
             cand = sample_around(smean); cand_g = sample_around(gmean)
         init = _np.vstack([init, cand]); goals = _np.vstack([goals, cand_g])
+    # gentle push apart in XY if needed
     for arr in (init, goals):
         if not ok(arr):
             center = arr.mean(axis=0)
-            for _ in range(50):
+            for _ in range(80):
                 if ok(arr): break
                 for i in range(len(arr)):
                     v = arr[i]-center
                     if (v[:2]**2).sum() < 1e-8:
                         v[:2] = _np.array([rng.uniform(-1,1), rng.uniform(-1,1)], dtype=_np.float32)
-                    arr[i,:2] = arr[i,:2] + (v[:2] / (1e-9+_np.linalg.norm(v[:2])))*0.05
+                    arr[i,:2] = arr[i,:2] + (v[:2] / (1e-9+_np.linalg.norm(v[:2])))*0.06
                 arr[:] = clamp(arr)
     return init.astype(_np.float32), goals.astype(_np.float32)
 
@@ -131,6 +135,37 @@ def generate_env(bounds: np.ndarray, init: np.ndarray, goals: np.ndarray, level:
         raise ValueError("Unsupported complexity level")
     return env
 
+def spawn_valid_trial(K, level, seed, bounds, base_init, base_goals, out_abs, min_sep, env_tries, spawn_tries, debug):
+    """
+    Attempt to find (init, goals, env_path) that passes is_valid(init) and spacing.
+    Returns (init, goals, env_path) or (None, None, None) if all tries fail.
+    """
+    for spawn in range(spawn_tries):
+        rng = random.Random(seed + 50000*spawn + 1000*K + 100*level)
+        init, goals = make_init_goals_for_K(bounds, base_init, base_goals, K, rng, min_sep=min_sep)
+
+        # quick spacing check
+        D = np.linalg.norm(init[:,None,:]-init[None,:,:], axis=-1)
+        mask = np.triu(np.ones((K,K)), 1).astype(bool)
+        min_d = np.min(D[mask]) if K>1 else float('inf')
+        if K>1 and min_d < min_sep-1e-6:
+            if debug: print(f"[DBG] spawn={spawn}: spacing fail (min {min_d:.3f} < {min_sep:.3f}) -> resample starts/goals")
+            continue
+
+        for attempt in range(env_tries):
+            env = generate_env(bounds, init, goals, level, seed + 10000*attempt + 7*spawn)
+            env_path = os.path.join(out_abs, f'env_K{K}_L{level}_seed{seed}_spawn{spawn}_try{attempt}.yaml')
+            with open(env_path, 'w') as f:
+                yaml.safe_dump(env, f, sort_keys=False)
+
+            sim = MultiDrone(num_drones=K, environment_file=env_path)
+            ok = sim.is_valid(init)
+            if debug:
+                print(f"[DBG] spawn={spawn} try={attempt}: is_valid(init)={ok}  min-start-dist={min_d:.3f}  path={env_path}")
+            if ok:
+                return init, goals, env_path
+    return None, None, None
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--base-env', type=str, default='environment.yaml')
@@ -145,7 +180,9 @@ def main():
     ap.add_argument('--outdir', type=str, default='results_q4')
     ap.add_argument('--viz', type=int, default=0)
     ap.add_argument('--drone-radius', type=float, default=0.3)
-    ap.add_argument('--min-sep', type=float, default=None)
+    ap.add_argument('--min-sep', type=float, default=None, help='If omitted, defaults to 2*drone_radius')
+    ap.add_argument('--env-tries', type=int, default=20, help='Tries per spawn to regenerate maps')
+    ap.add_argument('--spawn-tries', type=int, default=40, help='How many times to re-sample starts/goals')
     ap.add_argument('--debug', type=int, default=0)
     args = ap.parse_args()
 
@@ -160,7 +197,7 @@ def main():
     k_base = len(base['initial_configuration'])
     bounds, base_init, base_goals = read_base(args.base_env)
 
-    min_sep = (2.0*args.drone_radius + 0.1) if args.min_sep is None else float(args.min_sep)
+    min_sep = (2.0*args.drone_radius) if args.min_sep is None else float(args.min_sep)
     if args.k_list is not None: k_values = args.k_list
     elif args.k_range is not None: start, end = args.k_range; k_values = list(range(start, end+1))
     else: k_values = [args.k or k_base]
@@ -171,35 +208,30 @@ def main():
     for K in k_values:
         for level in args.levels:
             for seed in args.seeds:
-                rng = random.Random(seed + 1000*K + 100*level)
-                init, goals = make_init_goals_for_K(bounds, base_init, base_goals, K, rng, min_sep=min_sep)
-                ok_init = False; env_path = None
-                for attempt in range(10):
-                    env = generate_env(bounds, init, goals, level, seed + 10000*attempt)
-                    env_path = os.path.join(out_abs, f'env_K{K}_level{level}_seed{seed}_try{attempt}.yaml')
-                    with open(env_path, 'w') as f:
-                        yaml.safe_dump(env, f, sort_keys=False)
-                    sim = MultiDrone(num_drones=K, environment_file=env_path)
-                    D = np.linalg.norm(init[:,None,:]-init[None,:,:], axis=-1)
-                    mask = np.triu(np.ones((K,K)), 1).astype(bool)
-                    min_d = np.min(D[mask]) if K>1 else float('inf')
-                    if args.debug:
-                        print(f"[DBG] K={K} L={level} seed={seed} try={attempt}: min-start-dist={min_d:.3f} valid={sim.is_valid(init)} path={env_path}")
-                    if sim.is_valid(init) and (K==1 or min_d >= min_sep-1e-6):
-                        ok_init = True; break
-                if not ok_init:
-                    print(f"[WARN] Skip trial: K={K} level={level} seed={seed} (couldn't find valid start).")
+                init, goals, env_path = spawn_valid_trial(
+                    K, level, seed, bounds, base_init, base_goals, out_abs,
+                    min_sep=min_sep, env_tries=args.env_tries, spawn_tries=args.spawn_tries, debug=args.debug
+                )
+                if init is None:
+                    print(f"[WARN] Skip trial: K={K} level={level} seed={seed} (no valid start after {args.spawn_tries} spawns x {args.env_tries} envs).")
                     continue
 
+                sim = MultiDrone(num_drones=K, environment_file=env_path)
+
                 t0 = time.time()
-                ok, path_flat, stats = rrt_connect_plan(sim, time_limit=args.time_limit, step=args.step,
-                                                        goal_bias=args.goal_bias, seed=seed, do_postprocess=True)
+                ok, path_flat, stats = rrt_connect_plan(
+                    sim, time_limit=args.time_limit, step=args.step,
+                    goal_bias=args.goal_bias, seed=seed, do_postprocess=True)
                 elapsed = time.time() - t0
+
                 path_len = (sum(float(np.linalg.norm(a-b)) for a,b in zip(path_flat[:-1], path_flat[1:]))
                             if ok and len(path_flat) >= 2 else float('nan'))
-                per_trial.append({'K': K, 'level': level, 'seed': seed, 'success': int(ok),
-                                  'time_sec': stats.get('time', elapsed), 'nodes': stats.get('nodes', None),
-                                  'iterations': stats.get('iterations', None), 'path_len_joint': path_len})
+
+                per_trial.append({
+                    'K': K, 'level': level, 'seed': seed, 'success': int(ok),
+                    'time_sec': stats.get('time', elapsed), 'nodes': stats.get('nodes', None),
+                    'iterations': stats.get('iterations', None), 'path_len_joint': path_len,
+                })
                 if args.debug:
                     print(f"[DBG]  -> success={ok} time={stats.get('time', elapsed):.3f}s nodes={stats.get('nodes',-1)}")
 
@@ -212,15 +244,18 @@ def main():
                     sim.visualize_paths(path_cfgs)
 
     if len(per_trial)==0:
-        print("[ERROR] No trials completed. Nothing to write. Check earlier warnings above."); sys.exit(2)
+        print("[ERROR] No trials completed. Nothing to write. Check earlier warnings above.")
+        sys.exit(2)
 
     csv_path = os.path.join(out_abs, 'trials_q4.csv')
     with open(csv_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=list(per_trial[0].keys()))
         writer.writeheader()
-        for row in per_trial: writer.writerow(row)
+        for row in per_trial:
+            writer.writerow(row)
     print(f"[INFO] Wrote per-trial CSV -> {csv_path}")
 
+    # Aggregate summary
     summary = {}
     levels = sorted(set(x['level'] for x in per_trial)); k_groups = sorted(set(x['K'] for x in per_trial))
     def mc(samples):
@@ -240,12 +275,16 @@ def main():
             else: tm,tmlo,tmhi = float('nan'), float('nan'), float('nan')
             if len(plens)>0: pl,(pllo,plhi) = mc(plens)
             else: pl,pllo,plhi = float('nan'), float('nan'), float('nan')
-            summary[K][L] = {'n_trials': len(rows), 'success_rate_mean': sr, 'success_rate_CI95': [srlo, srhi],
-                             'time_sec_mean_successes': tm, 'time_sec_CI95_successes': [tmlo, tmhi],
-                             'path_len_mean_successes': pl, 'path_len_CI95_successes': [pllo, plhi]}
+            summary[K][L] = {
+                'n_trials': len(rows),
+                'success_rate_mean': sr, 'success_rate_CI95': [srlo, srhi],
+                'time_sec_mean_successes': tm, 'time_sec_CI95_successes': [tmlo, tmhi],
+                'path_len_mean_successes': pl, 'path_len_CI95_successes': [pllo, plhi],
+            }
 
     json_path = os.path.join(out_abs, 'summary_q4.json')
-    with open(json_path, 'w') as f: json.dump(summary, f, indent=2)
+    with open(json_path, 'w') as f:
+        json.dump(summary, f, indent=2)
     print(f"[INFO] Wrote summary JSON -> {json_path}")
 
 if __name__ == "__main__":
