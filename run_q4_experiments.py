@@ -1,22 +1,16 @@
-#!/usr/bin/env python3
 """
-Part B, Q4 runner (v3.2) — harder environments vertically + robust high‑K starts.
-
-What’s new vs v3.1:
+Part B, Q4 runner
 - Random obstacles can span almost floor→ceiling (prevents easy overflight).
 - L4 narrow passage walls are full-height; gap width ~= (2*drone_radius + 0.05).
 - Optional “ceiling slab” for levels >=3 to confine vertical motion.
-- Everything else (grid starts, adaptive spacing, obstacle clearance, logs) kept.
 
-Quick check:
-  python run_q4_experiments.py --base-env environment.yaml --levels 0 1 2 3 4 --seeds 0 1 --k-range 8 8 --time-limit 20 --outdir results_q4_check --debug 1
 """
+
 import argparse, os, time, math, json, random, sys
 import numpy as np
 import yaml
 from typing import Dict, Any, Tuple, List
 
-VERSION = "Q4-runner v3.2 (full-height clutter + size-aware L4 gap)"
 
 from multi_drone import MultiDrone
 from rrt_connect_multidrone import rrt_connect_plan
@@ -83,7 +77,7 @@ def make_cylinder(p1, p2, radius, rotation=(0,0,0), color='red'):
     return {'type':'cylinder', 'endpoints': [[float(x) for x in p1], [float(x) for x in p2]], 'radius': float(radius), 'rotation': list(rotation), 'color': color}
 
 def obstacle_clear_from_points(ob, points: np.ndarray, clearance: float, bounds: np.ndarray) -> bool:
-    """Conservative clearance check: keep a buffer 'clearance' (meters) from every point."""
+    """Conservative clearance check: keep a buffer 'clearance' (meters) from every point.""" # the automatic check that is performed.
     pts = points
     if ob['type'] == 'sphere':
         c = np.array(ob['position'], dtype=np.float32)
@@ -122,14 +116,14 @@ def obstacle_clear_from_points(ob, points: np.ndarray, clearance: float, bounds:
         return True
 
 def generate_env(bounds: np.ndarray, init: np.ndarray, goals: np.ndarray, level: int, seed: int, clearance: float, debug: int, rng: random.Random) -> Dict[str, Any]:
-    """Create an environment; obstacles respect a 'clearance' from starts/goals and can be full-height."""
+    """Create an environment; obstacles respect a 'clearance' from starts/goals and can be full-height.""" # as per the question demand the fucntion has been executed
     env = {
         'bounds': {'x': bounds[0].tolist(), 'y': bounds[1].tolist(), 'z': bounds[2].tolist()},
         'initial_configuration': init.tolist(),
         'obstacles': [],
         'goals': [{'position': g.tolist(), 'radius': 1.0} for g in goals],
     }
-    # Allow tall obstacles (avoid trivial overflight)
+    # Allow tall obstacles (avoid trivial overflight) # altered the osbtacles again for including tall objects to see the path being used.
     ZR = (bounds[2,0]+0.5, bounds[2,1]-0.5)
     XR = (bounds[0,0]+2.0, bounds[0,1]-2.0); YR = (bounds[1,0]+2.0, bounds[1,1]-2.0)
 
@@ -142,7 +136,7 @@ def generate_env(bounds: np.ndarray, init: np.ndarray, goals: np.ndarray, level:
         typ = rng.choice(['box','sphere','cylinder'])
         if typ == 'box':
             pos = np.array([randf(*XR, rng), randf(*YR, rng), randf(*ZR, rng)], dtype=np.float32)
-            # z-size can be large (up to almost ceiling)
+            # z-size can be large (up to almost ceiling)   # later amended by adding a roofing to ensure the results are not false if path went out of bounds.
             z_span = randf(1.0, max(1.0, (bounds[2,1]-bounds[2,0]) - 1.0), rng)
             size = np.array([randf(1.5,4.5,rng), randf(1.5,4.5,rng), z_span], dtype=np.float32)
             try_add_obstacle(make_box(pos, size))
@@ -165,7 +159,7 @@ def generate_env(bounds: np.ndarray, init: np.ndarray, goals: np.ndarray, level:
         for _ in range(rng.randint(4,5)): add_random_obstacle()
     elif level == 3:
         for _ in range(rng.randint(6,8)): add_random_obstacle()
-        # optional shallow ceiling slab to confine motion
+        # optional shallow ceiling slab to confine motion #the final amend made to ensure the traversal path is not out of bounds.
         x_len = (bounds[0,1]-bounds[0,0]) - 2.0
         y_len = (bounds[1,1]-bounds[1,0]) - 2.0
         z_mid = bounds[2,1]-0.7
@@ -253,7 +247,6 @@ def main():
     ap.add_argument('--debug', type=int, default=0)
     args = ap.parse_args()
 
-    print(f"[INFO] {VERSION}")
     print(f"[INFO] Working dir: {os.getcwd()}")
     out_abs = os.path.abspath(args.outdir)
     os.makedirs(out_abs, exist_ok=True)
