@@ -2,14 +2,8 @@
 """
 analyse_q5_results.py — Q5 helper
 
-Reads the runner output directory (same format as Q4) and
-summarizes performance as the number of drones K increases.
-It prints tables and optionally saves plots vs K for each complexity level.
-
-Usage:
-  python analyse_q5_results.py --indir results_q4_k_part1 --make-plots 1
-  # or if you merged everything:
-  python analyse_q5_results.py --indir results_q4_k_all --make-plots 1
+Reads the runner output directory and summarizes performance as the number of drones K increases.
+prints tables and optionally saves plots vs K for each complexity level.
 """
 import argparse, os, json, math
 import numpy as np

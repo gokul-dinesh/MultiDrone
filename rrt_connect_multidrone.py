@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 RRT-Connect for centralized multi-drone motion planning (Part B, Q3).
 """

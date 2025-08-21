@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
 Analyse Q4 results: pretty-print summary by K and level, and (optional) plots.
-Usage:
-    python analyse_q4_results.py --indir results_q4_k --make-plots 1
 """
 import argparse, json, os, math
 import numpy as np
